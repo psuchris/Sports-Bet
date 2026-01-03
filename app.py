@@ -10,11 +10,22 @@ st.title("🏀 NCAAB Betting Engine")
 st.caption("SRS-based model with consensus Vegas lines")
 
 # --- API KEY ---
-api_key = st.secrets.get("ODDS_API_KEY") or st.text_input(
-    "Odds API Key",
-    type="password",
+import os
+
+api_key = os.getenv("ODDS_API_KEY")
+
+if not api_key:
+    api_key = st.text_input(
+        "Odds API Key",
+        type="password",
+        help="Enter your The Odds API key (not stored)"
+    )
+
+if not api_key:
+    st.warning("Enter your Odds API key to run the app.")
+    st.stop()
     help="Stored as env var ODDS_API_KEY or Streamlit secret",
-)
+
 
 if not api_key:
     st.warning("Enter your Odds API key to run the app.")
