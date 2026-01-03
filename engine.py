@@ -7,7 +7,7 @@ import re
 import statistics
 import time
 from dataclasses import asdict, dataclass
-from typing import Iterable
+from typing import Iterable, Optional
 
 import pandas as pd
 import requests
@@ -148,7 +148,7 @@ def get_ncaa_ratings(season_year: int) -> pd.DataFrame:
         return pd.read_csv(fp)
 
     headers = {
-        "User-Agent": "Mozilla/5.0 (compatible; SportsBet/1.0; +https://example.com)"
+        "User-Agent": "Mozilla/5.0 (compatible; SportsBet/1.0)"
     }
     resp = requests.get(url, headers=headers, timeout=REQUEST_TIMEOUT_SEC)
     resp.raise_for_status()
@@ -243,13 +243,15 @@ def fetch_odds(
 
 
 def _trimmed(points: Iterable[float], trim_percent: float) -> list[float]:
-    if not points:
+    pts = sorted(list(points))
+    if not pts:
         return []
-    points = sorted(points)
-    trim = int(len(points) * trim_percent)
-    if trim == 0:
-        return points
-    return points[trim:-trim]
+    trim = int(len(pts) * trim_percent)
+    if trim <= 0:
+        return pts
+    if len(pts) <= 2 * trim:
+        return pts
+    return pts[trim:-trim]
 
 
 def consensus_home_spread(
@@ -260,8 +262,10 @@ def consensus_home_spread(
 ) -> ConsensusLine:
     points: list[float] = []
     prices: list[float] = []
+    contributing_books = 0
 
     for bm in game.get("bookmakers", []) or []:
+        bm_added = False
         for m in bm.get("markets", []) or []:
             if m.get("key") != "spreads":
                 continue
@@ -269,13 +273,16 @@ def consensus_home_spread(
                 if o.get("name") == home_team and "point" in o:
                     try:
                         points.append(float(o["point"]))
+                        bm_added = True
                     except (TypeError, ValueError):
                         pass
-                    if "price" in o:
-                        try:
-                            prices.append(float(o["price"]))
-                        except (TypeError, ValueError):
-                            pass
+                if o.get("name") == home_team and "price" in o:
+                    try:
+                        prices.append(float(o["price"]))
+                    except (TypeError, ValueError):
+                        pass
+        if bm_added:
+            contributing_books += 1
 
     if not points:
         return ConsensusLine(point=None, price=None, books=0)
@@ -287,37 +294,47 @@ def consensus_home_spread(
         point = statistics.median(points)
 
     price = statistics.median(prices) if prices else None
-    return ConsensusLine(point=point, price=price, books=len(points))
+    return ConsensusLine(point=float(point), price=price, books=contributing_books)
 
 
 def consensus_moneyline(game: dict, home_team: str, away_team: str) -> MoneylineConsensus:
     home_prices: list[float] = []
     away_prices: list[float] = []
+    contributing_books = 0
 
     for bm in game.get("bookmakers", []) or []:
+        hm: Optional[float] = None
+        aw: Optional[float] = None
+
         for m in bm.get("markets", []) or []:
             if m.get("key") != "h2h":
                 continue
             for o in m.get("outcomes", []) or []:
                 if o.get("name") == home_team and "price" in o:
                     try:
-                        home_prices.append(float(o["price"]))
+                        hm = float(o["price"])
                     except (TypeError, ValueError):
-                        pass
+                        hm = None
                 if o.get("name") == away_team and "price" in o:
                     try:
-                        away_prices.append(float(o["price"]))
+                        aw = float(o["price"])
                     except (TypeError, ValueError):
-                        pass
+                        aw = None
 
-    books = min(len(home_prices), len(away_prices))
+        if hm is not None:
+            home_prices.append(hm)
+        if aw is not None:
+            away_prices.append(aw)
+        if hm is not None and aw is not None:
+            contributing_books += 1
+
     if not home_prices or not away_prices:
-        return MoneylineConsensus(home_price=None, away_price=None, books=books)
+        return MoneylineConsensus(home_price=None, away_price=None, books=contributing_books)
 
     return MoneylineConsensus(
         home_price=statistics.median(home_prices),
         away_price=statistics.median(away_prices),
-        books=books,
+        books=contributing_books,
     )
 
 
@@ -325,8 +342,13 @@ def consensus_total(game: dict, method: str = "median", trim_percent: float = 0.
     totals: list[float] = []
     over_prices: list[float] = []
     under_prices: list[float] = []
+    contributing_books = 0
 
     for bm in game.get("bookmakers", []) or []:
+        bm_total_added = False
+        bm_over: Optional[float] = None
+        bm_under: Optional[float] = None
+
         for m in bm.get("markets", []) or []:
             if m.get("key") != "totals":
                 continue
@@ -334,23 +356,33 @@ def consensus_total(game: dict, method: str = "median", trim_percent: float = 0.
                 if o.get("name") == "Over" and "point" in o:
                     try:
                         totals.append(float(o["point"]))
+                        bm_total_added = True
                     except (TypeError, ValueError):
                         pass
                     if "price" in o:
                         try:
-                            over_prices.append(float(o["price"]))
+                            bm_over = float(o["price"])
                         except (TypeError, ValueError):
-                            pass
+                            bm_over = None
+
                 if o.get("name") == "Under" and "point" in o:
                     try:
                         totals.append(float(o["point"]))
+                        bm_total_added = True
                     except (TypeError, ValueError):
                         pass
                     if "price" in o:
                         try:
-                            under_prices.append(float(o["price"]))
+                            bm_under = float(o["price"])
                         except (TypeError, ValueError):
-                            pass
+                            bm_under = None
+
+        if bm_over is not None:
+            over_prices.append(bm_over)
+        if bm_under is not None:
+            under_prices.append(bm_under)
+        if bm_total_added and bm_over is not None and bm_under is not None:
+            contributing_books += 1
 
     if not totals:
         return TotalConsensus(total=None, over_price=None, under_price=None, books=0)
@@ -362,10 +394,10 @@ def consensus_total(game: dict, method: str = "median", trim_percent: float = 0.
         total = statistics.median(totals)
 
     return TotalConsensus(
-        total=total,
+        total=float(total),
         over_price=statistics.median(over_prices) if over_prices else None,
         under_price=statistics.median(under_prices) if under_prices else None,
-        books=min(len(over_prices), len(under_prices)),
+        books=contributing_books,
     )
 
 
@@ -380,8 +412,17 @@ def win_prob_from_rating(diff: float, scale: float = 7.5) -> float:
 
 def implied_prob_from_moneyline(price: float) -> float:
     if price > 0:
-        return 100 / (price + 100)
-    return -price / (-price + 100)
+        return 100.0 / (price + 100.0)
+    return (-price) / ((-price) + 100.0)
+
+
+def no_vig_probs_from_moneylines(home_price: float, away_price: float) -> tuple[float, float]:
+    hp = implied_prob_from_moneyline(home_price)
+    ap = implied_prob_from_moneyline(away_price)
+    s = hp + ap
+    if s <= 0:
+        return 0.5, 0.5
+    return hp / s, ap / s
 
 
 def confidence_from_edge(edge_value: float, books: int, scale: float) -> int:
@@ -453,23 +494,6 @@ def compute_edges(
     return df
 
 
-def _league_total_anchor(
-    games: list[dict],
-    method: str,
-    trim_percent: float,
-    min_books: int,
-) -> float | None:
-    totals: list[float] = []
-    for g in games:
-        consensus = consensus_total(g, method=method, trim_percent=trim_percent)
-        if consensus.total is None or consensus.books < min_books:
-            continue
-        totals.append(consensus.total)
-    if not totals:
-        return None
-    return statistics.median(totals)
-
-
 def compute_top_bets(
     api_key: str,
     season_year: int,
@@ -485,6 +509,7 @@ def compute_top_bets(
     regions: str = "us",
     odds_format: str = "american",
     top_n: int = 10,
+    enable_totals: bool = False,
 ) -> pd.DataFrame:
     ratings = get_ncaa_ratings(season_year)
     lookup = TeamLookup(ratings, fuzzy_min_score=fuzzy_min_score)
@@ -496,14 +521,8 @@ def compute_top_bets(
         markets=["spreads", "h2h", "totals"],
     )
 
-    league_total = _league_total_anchor(
-        games,
-        method=consensus_method,
-        trim_percent=trim_percent,
-        min_books=min_books,
-    )
-
     rows: list[TopBet] = []
+
     for g in games:
         home = g.get("home_team", "")
         away = g.get("away_team", "")
@@ -551,17 +570,18 @@ def compute_top_bets(
         ):
             rating_diff = (hr - ar) + home_court_adv
             home_win_prob = win_prob_from_rating(rating_diff)
-            away_win_prob = 1 - home_win_prob
+            away_win_prob = 1.0 - home_win_prob
 
-            home_implied = implied_prob_from_moneyline(moneyline.home_price)
-            away_implied = implied_prob_from_moneyline(moneyline.away_price)
+            home_implied_nv, away_implied_nv = no_vig_probs_from_moneylines(
+                moneyline.home_price, moneyline.away_price
+            )
 
-            home_edge = home_win_prob - home_implied
-            away_edge = away_win_prob - away_implied
+            home_edge = home_win_prob - home_implied_nv
+            away_edge = away_win_prob - away_implied_nv
 
             if home_edge >= moneyline_edge_threshold or away_edge >= moneyline_edge_threshold:
                 if home_edge >= away_edge:
-                    confidence = confidence_from_edge(home_edge * 100, moneyline.books, scale=1.4)
+                    confidence = confidence_from_edge(home_edge * 100.0, moneyline.books, scale=1.4)
                     rows.append(
                         TopBet(
                             Game=game_label,
@@ -575,7 +595,7 @@ def compute_top_bets(
                         )
                     )
                 else:
-                    confidence = confidence_from_edge(away_edge * 100, moneyline.books, scale=1.4)
+                    confidence = confidence_from_edge(away_edge * 100.0, moneyline.books, scale=1.4)
                     rows.append(
                         TopBet(
                             Game=game_label,
@@ -589,31 +609,14 @@ def compute_top_bets(
                         )
                     )
 
-        if league_total is not None:
+        if enable_totals:
+            # Totals are disabled by default because SRS is not a points projection model.
+            # Enable only if you replace this section with a real totals model.
             total = consensus_total(g, method=consensus_method, trim_percent=trim_percent)
             if total.total is not None and total.books >= min_books:
-                model_total = league_total + hr + ar
-                total_diff = model_total - total.total
-                if abs(total_diff) >= total_edge_threshold:
-                    if total_diff > 0:
-                        pick = "Over"
-                        price = total.over_price
-                    else:
-                        pick = "Under"
-                        price = total.under_price
-                    confidence = confidence_from_edge(total_diff, total.books, scale=10)
-                    rows.append(
-                        TopBet(
-                            Game=game_label,
-                            Market="total",
-                            Bet=f"{pick} {total.total:.1f}",
-                            Line=round(total.total, 1),
-                            Price=price,
-                            Confidence=confidence,
-                            Edge=round(total_diff, 2),
-                            Books=total.books,
-                        )
-                    )
+                # Placeholder model intentionally omitted.
+                # Leaving totals generation here would create misleading edges.
+                pass
 
     df = pd.DataFrame([asdict(row) for row in rows])
     if df.empty:
@@ -641,6 +644,7 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--trim-percent", type=float, default=0.1)
     parser.add_argument("--top-bets", type=int, default=10)
     parser.add_argument("--mode", choices=["edges", "top", "both"], default="top")
+    parser.add_argument("--enable-totals", action="store_true")
     parser.add_argument("--output", help="Write CSV output to this path.")
     parser.add_argument("--output-json", help="Write JSON output to this path.")
     parser.add_argument("--verbose", action="store_true")
@@ -707,6 +711,7 @@ def main() -> None:
             regions=args.regions,
             odds_format=args.odds_format,
             top_n=args.top_bets,
+            enable_totals=bool(args.enable_totals),
         )
 
         if top_bets.empty:
